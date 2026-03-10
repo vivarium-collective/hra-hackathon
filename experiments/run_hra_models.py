@@ -248,13 +248,30 @@ def _extract_result(emitter_data, step_key):
     return None
 
 
+def _downsample(time_points, values, max_points=100):
+    """Downsample time series to at most max_points, keeping first and last."""
+    n = len(time_points)
+    if n <= max_points:
+        return time_points, values
+    step = max(1, n // max_points)
+    indices = list(range(0, n, step))
+    if indices[-1] != n - 1:
+        indices.append(n - 1)
+    return [time_points[i] for i in indices], [values[i] for i in indices]
+
+
 def _make_plotly_figure(result_data, title):
     """Build a Plotly figure from time-course result data."""
+    time_pts, vals = _downsample(result_data["time"], result_data["values"])
+    # Round to 6 significant figures to reduce HTML size
+    time_pts = [round(t, 6) for t in time_pts]
+    vals = [[float(f"{v:.6g}") for v in row] for row in vals]
+
     fig = go.Figure()
     for i, species in enumerate(result_data["columns"]):
         fig.add_trace(go.Scatter(
-            x=result_data["time"],
-            y=[row[i] for row in result_data["values"]],
+            x=time_pts,
+            y=[row[i] for row in vals],
             mode="lines",
             name=species,
             hovertemplate=f"<b>{species}</b><br>"
