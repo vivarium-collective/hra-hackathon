@@ -1,0 +1,17 @@
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+uv.lock
+.idea/
+.DS_Store
+.devenv/
+.devenv.flake.nix
+devenv.lock
+.envrc
+
+# Generated at runtime (re-downloadable)
+models/BIOMD*/
+documents/
+out_hra_models/*.json
+out_test/
