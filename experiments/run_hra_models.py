@@ -221,6 +221,68 @@ def run_document(document, core, name):
 
 # --- Model info & plotting ---
 
+# Time units known from publications but missing from SBML metadata
+_TIME_UNIT_OVERRIDES = {
+    "Nyman2011":  "min",   # Dalla Man glucose model family uses minutes
+    "Koenig2012": "min",   # hepatic glucose metabolism, rates in µmol/kg/min
+}
+
+
+def _sbml_time_unit(model):
+    """Determine the human-readable time unit from an SBML model."""
+    tu_id = model.getTimeUnits() or ""
+    # Check built-in unit names first
+    if tu_id in ("second", "s"):
+        return "s"
+    if tu_id in ("minute", "min"):
+        return "min"
+    if tu_id in ("hour", "h"):
+        return "h"
+    if tu_id in ("day", "d"):
+        return "day"
+
+    # Look up the unit definition and compute total multiplier in seconds
+    ud = model.getUnitDefinition(tu_id) if tu_id else None
+    if ud and ud.getNumUnits() > 0:
+        total_seconds = 1.0
+        for i in range(ud.getNumUnits()):
+            u = ud.getUnit(i)
+            if u.getKind() == libsbml.UNIT_KIND_SECOND:
+                total_seconds = u.getMultiplier() * (10 ** u.getScale()) ** u.getExponent()
+                break
+        if abs(total_seconds - 1.0) < 0.1:
+            return "s"
+        if abs(total_seconds - 60.0) < 1.0:
+            return "min"
+        if abs(total_seconds - 3600.0) < 60.0:
+            return "h"
+        if abs(total_seconds - 86400.0) < 600.0:
+            return "day"
+
+    # Fallback: check substance/time unit definitions for clues
+    for i in range(model.getNumUnitDefinitions()):
+        ud = model.getUnitDefinition(i)
+        uid = ud.getId().lower()
+        if "time" in uid or uid in ("minute", "min", "second", "day", "hour"):
+            for j in range(ud.getNumUnits()):
+                u = ud.getUnit(j)
+                if u.getKind() == libsbml.UNIT_KIND_SECOND:
+                    secs = u.getMultiplier() * (10 ** u.getScale()) ** u.getExponent()
+                    if abs(secs - 60.0) < 1.0:
+                        return "min"
+                    if abs(secs - 86400.0) < 600.0:
+                        return "day"
+                    if abs(secs - 3600.0) < 60.0:
+                        return "h"
+    # Check manual overrides by model name
+    model_name = (model.getName() or model.getId() or "")
+    for key, unit in _TIME_UNIT_OVERRIDES.items():
+        if key.lower() in model_name.lower():
+            return unit
+
+    return "s"  # default
+
+
 def _get_sbml_info(sbml_path):
     """Extract model metadata from SBML file."""
     doc = libsbml.readSBML(sbml_path)
@@ -235,6 +297,7 @@ def _get_sbml_info(sbml_path):
         "num_compartments": m.getNumCompartments(),
         "compartments": compartments,
         "num_parameters": m.getNumParameters(),
+        "time_unit": _sbml_time_unit(m),
     }
 
 
@@ -260,7 +323,7 @@ def _downsample(time_points, values, max_points=100):
     return [time_points[i] for i in indices], [values[i] for i in indices]
 
 
-def _make_plotly_figure(result_data, title):
+def _make_plotly_figure(result_data, title, time_unit="s"):
     """Build a Plotly figure from time-course result data."""
     time_pts, vals = _downsample(result_data["time"], result_data["values"])
     # Round to 6 significant figures to reduce HTML size
@@ -277,9 +340,10 @@ def _make_plotly_figure(result_data, title):
             hovertemplate=f"<b>{species}</b><br>"
                           f"Time: %{{x:.2f}}<br>Conc: %{{y:.4g}}<extra></extra>",
         ))
+    unit_labels = {"s": "seconds", "min": "minutes", "h": "hours", "day": "days"}
     fig.update_layout(
         title=title,
-        xaxis_title="Time (s)",
+        xaxis_title=f"Time ({unit_labels.get(time_unit, time_unit)})",
         yaxis_title="Concentration",
         hovermode="x unified",
         legend=dict(title="Species", font=dict(size=10)),
@@ -308,7 +372,7 @@ def build_results_page(model_results, outdir):
                 <tr><td>Reactions</td><td>{info.get('num_reactions', '?')}</td></tr>
                 <tr><td>Compartments</td><td>{', '.join(info.get('compartments', [])) or '?'}</td></tr>
                 <tr><td>Parameters</td><td>{info.get('num_parameters', '?')}</td></tr>
-                <tr><td>Simulation</td><td>{entry['duration']}s, {entry['n_points']} time points</td></tr>
+                <tr><td>Simulation</td><td>{entry['duration']} {entry.get('time_unit', 's')}, {entry['n_points']} time points</td></tr>
             </table>
             <div class="plot">{entry['plot_html']}</div>
         </div>
@@ -399,14 +463,16 @@ def run_hra_models(core):
             info = _get_sbml_info(sbml_path)
 
             if result_data:
+                time_unit = info.get("time_unit", "s")
                 title = f"{info.get('name', model_id)} — Time Course Simulation"
-                fig = _make_plotly_figure(result_data, title)
+                fig = _make_plotly_figure(result_data, title, time_unit=time_unit)
                 plot_html = fig.to_html(full_html=False, include_plotlyjs=False)
                 model_results.append({
                     "model_id": model_id,
                     "info": info,
                     "duration": duration,
                     "n_points": n_points,
+                    "time_unit": time_unit,
                     "plot_html": plot_html,
                 })
             else:
