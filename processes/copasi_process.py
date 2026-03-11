@@ -192,7 +192,7 @@ class CopasiUTCStep(Step, BaseCopasi):
 
         result = {
             "time": time_list,
-            "columns": [c for c in tc.columns],
+            "columns": [self.sbml_to_name.get(c, c) for c in tc.columns],
             "values": tc.values.tolist(),
         }
 
