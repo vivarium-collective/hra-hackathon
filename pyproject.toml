@@ -11,37 +11,22 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
     "bigraph-schema",
     "process-bigraph",
-    "matplotlib",
-    "bigraph-viz",
     "copasi-basico",
-    "tellurium",
-    "rest-process",
     "biomodels",
     "python-libsedml",
-    "pytest",
+    "requests",
     "plotly>=6.5.2",
 ]
 
-# Optional/dev dependencies
 [project.optional-dependencies]
 dev = [
     "pytest",
     "build",
 ]
 
-# Make sure all subpackages are included
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["biocompose*"]
+include = ["processes*", "experiments*"]
 exclude = ["tests*", "docs*"]
 
-# If you want console entry points later, uncomment and edit:
-# [project.scripts]
-# spatio-flux = "spatio_flux.cli:main"
-
-# uv local editable sources
 [tool.uv.sources]
-# bigraph-schema = { path = "../bigraph-schema", editable = true }
-# process-bigraph = { path = "../process-bigraph", editable = true }
-# rest-process = { path = "../rest-process", editable = true }
-# bigraph-viz = { path = "../bigraph-viz", editable = true }

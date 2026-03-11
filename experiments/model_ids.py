@@ -1,0 +1,12 @@
+"""Default BioModels IDs for HRA hackathon simulations."""
+
+HRA_MODEL_IDS = [
+    "BIOMD0000000356",
+    "BIOMD0000000620",
+    "BIOMD0000000621",
+    "BIOMD0000000833",
+    "BIOMD0000000854",
+    "MODEL1209260000",
+    "MODEL1912090001",
+    "MODEL2401110001",
+]
