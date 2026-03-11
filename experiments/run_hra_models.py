@@ -10,10 +10,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import time as _time
+
 import biomodels
 import libsbml
 import libsedml
 import plotly.graph_objects as go
+import requests
 from process_bigraph import allocate_core, Composite, gather_emitter_results
 from process_bigraph.emitter import emitter_from_wires
 
@@ -219,6 +222,169 @@ def run_document(document, core, name):
     return gather_emitter_results(sim).get(("emitter",), [])
 
 
+# --- Species name resolution ---
+
+_IDENT_RE = re.compile(r'identifiers\.org/(uniprot|CHEBI|chebi|kegg\.compound)/([A-Za-z0-9:_.-]+)')
+
+# Global cache so we don't re-fetch the same protein across models
+_NAME_CACHE: dict[str, str] = {}
+
+
+def _extract_species_identifiers(sbml_path):
+    """Parse SBML annotations and return {species_name: {db: [ids]}}."""
+    doc = libsbml.readSBML(sbml_path)
+    model = doc.getModel() if doc else None
+    if not model:
+        return {}
+
+    result = {}
+    for i in range(model.getNumSpecies()):
+        sp = model.getSpecies(i)
+        name = sp.getName() or sp.getId()
+        annotation = sp.getAnnotationString() or ""
+        ids: dict[str, list[str]] = {}
+        for match in _IDENT_RE.finditer(annotation):
+            db = match.group(1).lower()
+            acc = match.group(2)
+            ids.setdefault(db, []).append(acc)
+        if ids:
+            result[name] = ids
+    return result
+
+
+def _fetch_uniprot_name(accession):
+    """Fetch recommended protein name from UniProt REST API."""
+    if accession in _NAME_CACHE:
+        return _NAME_CACHE[accession]
+    try:
+        resp = requests.get(
+            f"https://rest.uniprot.org/uniprotkb/{accession}.json",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            desc = data.get("proteinDescription", {})
+            rec = desc.get("recommendedName", {})
+            # Prefer short name, fall back to full name
+            short = rec.get("shortNames", [{}])
+            if short and short[0].get("value"):
+                name = short[0]["value"]
+            else:
+                name = rec.get("fullName", {}).get("value", "")
+            if name:
+                _NAME_CACHE[accession] = name
+                return name
+    except requests.RequestException:
+        pass
+    _NAME_CACHE[accession] = ""
+    return ""
+
+
+def _fetch_kegg_name(compound_id):
+    """Fetch compound name from KEGG REST API."""
+    key = f"kegg:{compound_id}"
+    if key in _NAME_CACHE:
+        return _NAME_CACHE[key]
+    try:
+        resp = requests.get(f"https://rest.kegg.jp/get/{compound_id}", timeout=10)
+        if resp.status_code == 200:
+            for line in resp.text.splitlines():
+                if line.startswith("NAME"):
+                    name = line.split(None, 1)[1].rstrip(";").strip()
+                    _NAME_CACHE[key] = name
+                    return name
+    except requests.RequestException:
+        pass
+    _NAME_CACHE[key] = ""
+    return ""
+
+
+def _clean_species_name(name):
+    """Clean up a species name: strip x##_ prefixes, replace underscores."""
+    # Strip leading x##_ prefix (e.g. x9_IRS_1 -> IRS 1)
+    cleaned = re.sub(r"^x\d+_", "", name)
+    # Strip BioNetGen-style state annotations: "IR(NPXY,Y999~u,...)" -> "IR"
+    cleaned = re.sub(r"\(.*\)$", "", cleaned)
+    # Replace underscores with spaces
+    cleaned = cleaned.replace("_", " ")
+    return cleaned.strip() or name
+
+
+def _resolve_species_names(sbml_path):
+    """Build a display name mapping for species in an SBML model.
+
+    Returns {copasi_display_name: human_readable_name}.
+    """
+    doc = libsbml.readSBML(sbml_path)
+    model = doc.getModel() if doc else None
+    if not model:
+        return {}
+
+    identifiers = _extract_species_identifiers(sbml_path)
+    name_map = {}
+    uniprot_batch = {}  # name -> accession, for batch lookup
+
+    for i in range(model.getNumSpecies()):
+        sp = model.getSpecies(i)
+        sp_name = sp.getName() or sp.getId()
+        sp_ids = identifiers.get(sp_name, {})
+
+        # Collect UniProt IDs for batch fetching
+        if "uniprot" in sp_ids:
+            acc = sp_ids["uniprot"][0]
+            if acc not in _NAME_CACHE:
+                uniprot_batch[sp_name] = acc
+
+    # Batch fetch UniProt names (with rate limiting)
+    for sp_name, acc in uniprot_batch.items():
+        _fetch_uniprot_name(acc)
+        _time.sleep(0.1)  # be polite to UniProt API
+
+    # Now build the final name map
+    seen_names: dict[str, int] = {}  # track duplicates
+    for i in range(model.getNumSpecies()):
+        sp = model.getSpecies(i)
+        sp_name = sp.getName() or sp.getId()
+        sp_ids = identifiers.get(sp_name, {})
+
+        resolved = ""
+        db_label = ""
+
+        # Try UniProt first
+        if "uniprot" in sp_ids:
+            acc = sp_ids["uniprot"][0]
+            resolved = _NAME_CACHE.get(acc, "")
+            if resolved:
+                db_label = f"UniProt:{acc}"
+
+        # Try KEGG
+        if not resolved and "kegg.compound" in sp_ids:
+            kid = sp_ids["kegg.compound"][0]
+            resolved = _fetch_kegg_name(kid)
+            if resolved:
+                db_label = f"KEGG:{kid}"
+            _time.sleep(0.1)
+
+        # Use SBML name attribute if it's informative (not same as ID)
+        if not resolved:
+            sbml_name = sp.getName() or ""
+            sbml_id = sp.getId() or ""
+            if sbml_name and sbml_name != sbml_id:
+                resolved = _clean_species_name(sbml_name)
+            else:
+                resolved = _clean_species_name(sbml_id)
+
+        # Disambiguate duplicate display names (e.g. multiple "INSR" states)
+        count = seen_names.get(resolved, 0)
+        seen_names[resolved] = count + 1
+        if count > 0:
+            resolved = f"{resolved} ({sp_name})"
+
+        name_map[sp_name] = {"display": resolved, "db_id": db_label}
+
+    return name_map
+
+
 # --- Model info & plotting ---
 
 # Time units known from publications but missing from SBML metadata
@@ -323,7 +489,7 @@ def _downsample(time_points, values, max_points=100):
     return [time_points[i] for i in indices], [values[i] for i in indices]
 
 
-def _make_plotly_figure(result_data, title, time_unit="s"):
+def _make_plotly_figure(result_data, title, time_unit="s", name_map=None):
     """Build a Plotly figure from time-course result data."""
     time_pts, vals = _downsample(result_data["time"], result_data["values"])
     # Round to 6 significant figures to reduce HTML size
@@ -332,12 +498,16 @@ def _make_plotly_figure(result_data, title, time_unit="s"):
 
     fig = go.Figure()
     for i, species in enumerate(result_data["columns"]):
+        entry = (name_map or {}).get(species, {})
+        display = entry.get("display", species) if entry else species
+        db_id = entry.get("db_id", "") if entry else ""
+        db_line = f"<br>{db_id}" if db_id else ""
         fig.add_trace(go.Scatter(
             x=time_pts,
             y=[row[i] for row in vals],
             mode="lines",
-            name=species,
-            hovertemplate=f"<b>{species}</b><br>"
+            name=display,
+            hovertemplate=f"<b>{display}</b>{db_line}<br>"
                           f"Time: %{{x:.2f}}<br>Conc: %{{y:.4g}}<extra></extra>",
         ))
     unit_labels = {"s": "seconds", "min": "minutes", "h": "hours", "day": "days"}
@@ -465,7 +635,10 @@ def run_hra_models(core):
             if result_data:
                 time_unit = info.get("time_unit", "s")
                 title = f"{info.get('name', model_id)} — Time Course Simulation"
-                fig = _make_plotly_figure(result_data, title, time_unit=time_unit)
+                print(f"  Resolving species names from SBML annotations...")
+                name_map = _resolve_species_names(sbml_path)
+                fig = _make_plotly_figure(result_data, title, time_unit=time_unit,
+                                         name_map=name_map)
                 plot_html = fig.to_html(full_html=False, include_plotlyjs=False)
                 model_results.append({
                     "model_id": model_id,

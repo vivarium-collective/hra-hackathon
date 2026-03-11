@@ -138,21 +138,6 @@ class CopasiUTCStep(Step, BaseCopasi):
             'result': 'numeric_result',
         }
 
-    def _run_with_roadrunner(self) -> DataFrame:
-        """Fallback simulator for models COPASI can't handle."""
-        import tellurium as te
-        rr = te.loadSBMLModel(model_path_resolution(self.config['model_source']))
-        result = rr.simulate(0, self.config['time'], self.n_points)
-        cols = [c for c in result.colnames if c != 'time']
-        clean_cols = [c.strip('[]').split('].')[-1] for c in cols]
-        tc = DataFrame(
-            data=result[:, 1:],
-            index=result[:, 0],
-            columns=clean_cols,
-        )
-        tc.index.name = 'Time'
-        return tc
-
     def update(self, inputs):
         # Apply incoming concentrations
         spec_data = inputs.get('counts', {}) or {}
@@ -183,10 +168,21 @@ class CopasiUTCStep(Step, BaseCopasi):
 
         tc: DataFrame = run_time_course(**tc_kwargs)
 
-        # If COPASI fails (NaN in results), fall back to RoadRunner
+        # Retry with stiffer solvers if LSODA produces NaN
         if tc.isnull().any().any():
-            print(f"  COPASI produced NaN, falling back to RoadRunner")
-            tc = self._run_with_roadrunner()
+            print("  LSODA produced NaN, retrying with more internal steps...")
+            tc = run_time_course(**{**tc_kwargs, 'max_steps': 500000})
+
+        if tc.isnull().any().any():
+            print("  Still NaN, retrying with RADAU5 (stiff solver)...")
+            tc = run_time_course(**{**tc_kwargs, 'method': 'radau5'})
+
+        if tc.isnull().any().any():
+            print("  Still NaN, retrying RADAU5 with looser tolerances...")
+            tc = run_time_course(**{
+                **tc_kwargs, 'method': 'radau5',
+                'r_tol': 1e-3, 'a_tol': 1e-6, 'max_steps': 10000000,
+            })
 
         time_list = tc.index.to_list()
 
