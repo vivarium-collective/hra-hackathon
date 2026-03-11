@@ -4,7 +4,7 @@ Simulation of [Human Reference Atlas](https://humanatlas.io/)-relevant biologica
 
 ## Results
 
-**[Download simulation results](https://raw.githubusercontent.com/vivarium-collective/hra-hackathon/main/out_hra_models/results.html)** — interactive Plotly plots with model metadata, hover tooltips, and toggle-able species traces. Save the HTML file and open it in your browser.
+**[View all simulation results](out_hra_models/results.html)** — interactive Plotly plots with model metadata, hover tooltips, and toggle-able species traces. Clone the repo and open the HTML file in your browser, or click the link above then use GitHub's download button (⬇).
 
 | Model ID | Description |
 |----------|-------------|
