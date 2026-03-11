@@ -10,8 +10,11 @@ uv.lock
 devenv.lock
 .envrc
 
-# Generated at runtime (re-downloadable)
+# Generated at runtime
 models/BIOMD*/
 documents/
 out_hra_models/*.json
 out_test/
+experiments/models/
+experiments/documents/
+experiments/out_hra_models/

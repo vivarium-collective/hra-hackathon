@@ -110,18 +110,19 @@ class CopasiUTCStep(Step, BaseCopasi):
         'model_source': 'string',
         'time': 'float',
         'n_points': 'integer',
+        'method': 'string',
+        'r_tol': 'float',
+        'a_tol': 'float',
     }
 
     def initialize(self, config=None):
         self.interpret_sbml()
 
-        # Simulation parameters
         self.interval = float(self.config.get('time', 1.0))
-        self.n_points = int(self.config.get('n_points', 2))   # <-- NEW
+        self.n_points = int(self.config.get('n_points', 2))
         if self.n_points < 2:
             raise ValueError("n_points must be >= 2")
-
-        self.intervals = self.n_points - 1   # COPASI requires this
+        self.intervals = self.n_points - 1
 
     def initial_state(self) -> Dict[str, Any]:
         return self.get_concentrations_from_sbml()
@@ -137,6 +138,21 @@ class CopasiUTCStep(Step, BaseCopasi):
             'result': 'numeric_result',
         }
 
+    def _run_with_roadrunner(self) -> DataFrame:
+        """Fallback simulator for models COPASI can't handle."""
+        import tellurium as te
+        rr = te.loadSBMLModel(model_path_resolution(self.config['model_source']))
+        result = rr.simulate(0, self.config['time'], self.n_points)
+        cols = [c for c in result.colnames if c != 'time']
+        clean_cols = [c.strip('[]').split('].')[-1] for c in cols]
+        tc = DataFrame(
+            data=result[:, 1:],
+            index=result[:, 0],
+            columns=clean_cols,
+        )
+        tc.index.name = 'Time'
+        return tc
+
     def update(self, inputs):
         # Apply incoming concentrations
         spec_data = inputs.get('counts', {}) or {}
@@ -149,8 +165,8 @@ class CopasiUTCStep(Step, BaseCopasi):
         if changes:
             _set_initial_concentrations(changes, self.dm)
 
-        # --- Run COPASI time course with intervals = n_points - 1 ---
-        tc: DataFrame = run_time_course(
+        # --- Run COPASI time course ---
+        tc_kwargs = dict(
             start_time=0.0,
             duration=self.config['time'],
             intervals=self.intervals,
@@ -158,15 +174,26 @@ class CopasiUTCStep(Step, BaseCopasi):
             use_sbml_id=True,
             model=self.dm,
         )
+        if self.config.get('method'):
+            tc_kwargs['method'] = self.config['method']
+        if self.config.get('r_tol'):
+            tc_kwargs['r_tol'] = self.config['r_tol']
+        if self.config.get('a_tol'):
+            tc_kwargs['a_tol'] = self.config['a_tol']
 
-        # Time series
+        tc: DataFrame = run_time_course(**tc_kwargs)
+
+        # If COPASI fails (NaN in results), fall back to RoadRunner
+        if tc.isnull().any().any():
+            print(f"  COPASI produced NaN, falling back to RoadRunner")
+            tc = self._run_with_roadrunner()
+
         time_list = tc.index.to_list()
 
         result = {
             "time": time_list,
             "columns": [c for c in tc.columns],
             "values": tc.values.tolist(),
-            # "n_spacial_dimensions": tc.shape,
         }
 
         return {"result": result}
